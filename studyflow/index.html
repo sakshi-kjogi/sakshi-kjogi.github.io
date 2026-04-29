@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'unsafe-inline'; img-src data: https:; connect-src https://*.supabase.co wss://*.supabase.co;">
 <title>StudyFlow - Smart Study Planner</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -487,13 +487,27 @@ body {
   font-variant-numeric: tabular-nums;
 }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 </head>
 <body>
 
+<div id="loading-overlay" style="position:fixed;inset:0;background:rgba(108,99,255,0.12);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;z-index:9999;">
+  <div style="background:white;border-radius:16px;padding:32px 40px;text-align:center;box-shadow:0 8px 32px rgba(108,99,255,0.2);">
+    <div style="width:40px;height:40px;border:3px solid #6c63ff;border-top-color:transparent;border-radius:50%;animation:spin 0.7s linear infinite;margin:0 auto 16px;"></div>
+    <div style="font-weight:600;color:#6c63ff;">Loading StudyFlow…</div>
+  </div>
+</div>
+
 <header class="header">
   <div class="logo">Study<span>Flow</span> ✨</div>
-  <div class="streak-badge" onclick="showStreakModal()">
-    🔥 <span id="streak-count">0</span> day streak
+  <div style="display:flex;align-items:center;gap:12px;">
+    <div class="streak-badge" onclick="showStreakModal()">
+      🔥 <span id="streak-count">0</span> day streak
+    </div>
+    <div id="user-info" style="display:none;align-items:center;gap:8px;background:rgba(255,255,255,0.2);padding:6px 14px;border-radius:20px;font-size:0.85rem;font-weight:600;">
+      <span id="user-name">User</span>
+      <button onclick="signOut()" style="background:rgba(255,255,255,0.3);border:none;color:white;padding:3px 10px;border-radius:12px;cursor:pointer;font-size:0.8rem;font-weight:600;">Sign out</button>
+    </div>
   </div>
 </header>
 
@@ -978,8 +992,84 @@ function genericQuestions(topic) {
   ];
 }
 
+// ===================== SUPABASE =====================
+const SUPABASE_URL  = 'YOUR_SUPABASE_PROJECT_URL';
+const SUPABASE_ANON = 'YOUR_SUPABASE_ANON_KEY';
+
+let sb = null;
+let _saveTimer = null;
+
+function initSupabase() {
+  if (SUPABASE_URL.startsWith('YOUR_') || SUPABASE_ANON.startsWith('YOUR_')) return;
+  try { sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON); } catch(e) { sb = null; }
+}
+
+async function checkAuth() {
+  if (!sb) { hideOverlay(); return; }
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) { window.location.replace('login.html'); return; }
+  renderUserHeader(session.user);
+  await loadFromSupabase(session.user.id);
+  hideOverlay();
+}
+
+function hideOverlay() {
+  const ol = document.getElementById('loading-overlay');
+  if (ol) ol.style.display = 'none';
+}
+
+function renderUserHeader(user) {
+  const info = document.getElementById('user-info');
+  const name = document.getElementById('user-name');
+  if (!info || !name) return;
+  const display = user.user_metadata?.full_name || user.email?.split('@')[0] || 'User';
+  name.textContent = escapeHtml(display);
+  info.style.display = 'flex';
+}
+
+async function loadFromSupabase(userId) {
+  if (!sb) return;
+  try {
+    const { data, error } = await sb.from('user_data').select('data').eq('user_id', userId).single();
+    if (error && error.code !== 'PGRST116') { console.warn('Load error', error); return; }
+    if (data?.data) {
+      const remote = data.data;
+      // Only merge if remote is newer or local has no topics
+      if (!state.topics.length || (remote.lastSaved && (!state.lastSaved || remote.lastSaved > state.lastSaved))) {
+        localStorage.setItem('studyflow_v2', JSON.stringify(remote));
+        loadState();
+        updateStreakDisplay();
+        renderStudyTab();
+        renderProgressTab();
+        populateQuizTopics();
+        restoreUploadUI();
+      }
+    }
+  } catch(e) { console.warn('Supabase load failed', e); }
+}
+
+async function saveToSupabase() {
+  if (!sb) return;
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) return;
+  const payload = { ...state, lastSaved: Date.now() };
+  await sb.from('user_data').upsert({ user_id: session.user.id, data: payload, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+}
+
+function debouncedSave() {
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => saveToSupabase(), 2000);
+}
+
+async function signOut() {
+  if (sb) await sb.auth.signOut();
+  localStorage.removeItem('studyflow_v2');
+  window.location.replace('login.html');
+}
+
 // ===================== INIT =====================
-function init() {
+async function init() {
+  initSupabase();
   loadState();
   updateStreakDisplay();
   setDefaultDates();
@@ -989,6 +1079,7 @@ function init() {
   document.getElementById('study-tip').textContent = STUDY_TIPS[Math.floor(Math.random() * STUDY_TIPS.length)];
   checkStreak();
   restoreUploadUI();
+  await checkAuth();
 }
 
 function loadState() {
@@ -1033,6 +1124,7 @@ function loadState() {
 
 function saveState() {
   try { localStorage.setItem('studyflow_v2', JSON.stringify(state)); } catch(e) {}
+  debouncedSave();
 }
 
 function setDefaultDates() {
