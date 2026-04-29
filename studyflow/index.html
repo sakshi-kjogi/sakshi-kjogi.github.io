@@ -1084,6 +1084,9 @@ function switchTab(tab) {
 
 function goToTab(tab) { switchTab(tab); }
 
+// Keeps actual File objects alive until content is read (not serialisable to localStorage)
+const pendingFiles = new Map();
+
 // ===================== FILE UPLOAD =====================
 function handleDragOver(e)  { e.preventDefault(); document.getElementById('upload-zone').classList.add('dragover'); }
 function handleDragLeave()  { document.getElementById('upload-zone').classList.remove('dragover'); }
@@ -1115,8 +1118,10 @@ function processFiles(files) {
     }
     const err = validateFile(f);
     if (err) { errors.push(`${escapeHtml(f.name.slice(0,40))}: ${err}`); continue; }
-    if (!state.files.find(x => x.name === f.name))
-      state.files.push({ name: f.name, size: f.size });
+    if (!state.files.find(x => x.name === f.name)) {
+      state.files.push({ name: f.name, size: f.size, wordCount: null });
+      pendingFiles.set(f.name, f); // keep File object for content reading
+    }
   }
 
   if (errors.length) showToast('⚠️ ' + errors[0]);
@@ -1129,18 +1134,27 @@ function processFiles(files) {
 }
 
 function renderFileList() {
-  document.getElementById('file-list').innerHTML = state.files.map((f, i) => `
+  document.getElementById('file-list').innerHTML = state.files.map((f, i) => {
+    const wordBadge = f.wordCount != null
+      ? `<span style="font-size:0.75rem;background:#f0fdf4;color:#16a34a;padding:2px 8px;border-radius:12px;font-weight:600">✓ ${f.wordCount.toLocaleString()} words</span>`
+      : (pendingFiles.has(f.name)
+          ? `<span style="font-size:0.75rem;background:#eff6ff;color:#1d4ed8;padding:2px 8px;border-radius:12px;font-weight:600">ready to analyse</span>`
+          : '');
+    return `
     <div class="file-item">
       <div class="file-info">
         <span class="file-icon">${getFileIcon(f.name)}</span>
         <div>
           <div class="file-name">${escapeHtml(f.name)}</div>
-          <div class="file-size">${escapeHtml(fmtSize(f.size))}</div>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:2px">
+            <span class="file-size">${escapeHtml(fmtSize(f.size))}</span>
+            ${wordBadge}
+          </div>
         </div>
       </div>
       <button class="file-remove" onclick="removeFile(${i})">✕</button>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 function removeFile(i) {
@@ -1151,72 +1165,308 @@ function removeFile(i) {
 }
 
 // ===================== TOPIC EXTRACTION =====================
-function extractTopics() {
+async function extractTopics() {
   if (!state.files.length) return;
   document.getElementById('files-section').style.display = 'none';
   document.getElementById('processing-section').style.display = 'block';
 
-  const steps = [
-    'Reading file content...',
-    'Identifying subject areas...',
-    'Extracting topics & subtopics...',
-    'Estimating study time per topic...',
-    'Finalising your topic list...'
-  ];
-  let step = 0;
   const statusEl = document.getElementById('processing-status');
-  const stepTimer = setInterval(() => {
-    statusEl.textContent = steps[Math.min(step++, steps.length - 1)];
-  }, 400);
+  const newTopics = [];
 
-  setTimeout(() => {
-    clearInterval(stepTimer);
-    const extracted = guessTopics(state.files);
-    state.topics = [...state.topics, ...extracted].filter((t, i, arr) =>
-      arr.findIndex(x => x.name === t.name) === i
-    );
+  try {
+    for (const fileInfo of state.files) {
+      statusEl.textContent = `Reading ${fileInfo.name}…`;
+
+      let text = fileInfo.textContent || '';
+
+      if (!text && pendingFiles.has(fileInfo.name)) {
+        text = await readFileContent(pendingFiles.get(fileInfo.name));
+        fileInfo.textContent = text;
+      }
+
+      const words = text.trim().split(/\s+/).filter(Boolean).length;
+      fileInfo.wordCount = words;
+
+      statusEl.textContent = `Analysing ${fileInfo.name} (${words.toLocaleString()} words)…`;
+      const topics = parseContentIntoTopics(text, fileInfo.name);
+      newTopics.push(...topics);
+    }
+
+    state.topics = [...state.topics, ...newTopics]
+      .filter((t, i, arr) => arr.findIndex(x => x.name === t.name) === i);
+
     document.getElementById('processing-section').style.display = 'none';
     document.getElementById('files-section').style.display = 'block';
     document.getElementById('topics-section').style.display = 'block';
     saveState();
+    renderFileList();   // refresh word-count badges
     renderTopicList();
     populateQuizTopics();
-    showToast(`✅ Extracted ${extracted.length} topics successfully!`);
-  }, 2200);
+    showToast(`✅ Extracted ${newTopics.length} topics from ${state.files.length} file(s)!`);
+  } catch(e) {
+    console.error(e);
+    document.getElementById('processing-section').style.display = 'none';
+    document.getElementById('files-section').style.display = 'block';
+    showToast('⚠️ Could not read some files. Try saving as .txt');
+  }
 }
 
-function guessTopics(files) {
-  const result = [];
-  const used = new Set();
-
-  files.forEach(f => {
-    const name = f.name.toLowerCase().replace(/\.[^.]+$/, '');
-    let matched = false;
-    for (const [key, topicNames] of Object.entries(TOPIC_TEMPLATES)) {
-      if (name.includes(key)) {
-        if (!used.has(key)) {
-          used.add(key);
-          topicNames.slice(0, 5).forEach(t => result.push(makeTopic(t, capitalize(key))));
-          matched = true;
-        }
-        break;
-      }
-    }
-    if (!matched) {
-      const subj = name.replace(/[-_]/g,' ').split(' ').map(capitalize).join(' ');
-      if (!used.has(subj) && subj.length > 2) {
-        used.add(subj);
-        result.push(makeTopic(subj, 'General Studies'));
-      }
-    }
+// ===================== CONTENT READING =====================
+function readFileContent(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (['txt','md','csv'].includes(ext)) return readAsText(file);
+  return readAsArrayBuffer(file).then(buf => {
+    if (!buf) return '';
+    if (ext === 'pdf')                   return extractPDFText(buf);
+    if (['doc','docx'].includes(ext))    return extractDOCXText(buf);
+    if (['ppt','pptx'].includes(ext))    return extractPPTXText(buf);
+    return extractReadableSequences(buf);
   });
+}
 
-  if (result.length === 0) {
-    ['Introduction','Core Concepts','Applications','Practice & Review'].forEach(t =>
-      result.push(makeTopic(t, 'General Studies'))
-    );
+function readAsText(file) {
+  return new Promise(res => {
+    const r = new FileReader();
+    r.onload  = e => res(e.target.result || '');
+    r.onerror = () => res('');
+    r.readAsText(file, 'UTF-8');
+  });
+}
+
+function readAsArrayBuffer(file) {
+  return new Promise(res => {
+    const r = new FileReader();
+    r.onload  = e => res(e.target.result);
+    r.onerror = () => res(null);
+    r.readAsArrayBuffer(file);
+  });
+}
+
+function extractPDFText(buf) {
+  try {
+    const raw = new TextDecoder('latin1').decode(buf);
+    const parts = [];
+    // BT … ET blocks
+    const btRe = /BT([\s\S]*?)ET/g;
+    let bm;
+    while ((bm = btRe.exec(raw)) !== null) {
+      // (string) Tj  or  [(str)(str)] TJ
+      const strRe = /\(([^)\\]*(?:\\.[^)\\]*)*)\)/g;
+      let sm;
+      while ((sm = strRe.exec(bm[1])) !== null) {
+        const t = decodePDFStr(sm[1]).replace(/\s+/g,' ').trim();
+        if (t.length > 1) parts.push(t);
+      }
+    }
+    return parts.join(' ');
+  } catch(e) { return ''; }
+}
+
+function decodePDFStr(s) {
+  return s
+    .replace(/\\([0-7]{1,3})/g, (_,o) => String.fromCharCode(parseInt(o,8)))
+    .replace(/\\n/g,'\n').replace(/\\r/g,'').replace(/\\t/g,' ')
+    .replace(/\\\\/g,'\\').replace(/\\\(/g,'(').replace(/\\\)/g,')');
+}
+
+function extractDOCXText(buf) {
+  try {
+    const raw = new TextDecoder('utf-8',{fatal:false}).decode(buf);
+    const parts = [];
+    const re = /<w:t[^>]*>([^<]+)<\/w:t>/g;
+    let m;
+    while ((m = re.exec(raw)) !== null) if (m[1].trim()) parts.push(m[1]);
+    if (parts.length) return parts.join(' ');
+    return extractReadableSequences(buf);
+  } catch(e) { return ''; }
+}
+
+function extractPPTXText(buf) {
+  try {
+    const raw = new TextDecoder('utf-8',{fatal:false}).decode(buf);
+    const parts = [];
+    const re = /<a:t[^>]*>([^<]+)<\/a:t>/g;
+    let m;
+    while ((m = re.exec(raw)) !== null) if (m[1].trim()) parts.push(m[1]);
+    if (parts.length) return parts.join('\n');
+    return extractReadableSequences(buf);
+  } catch(e) { return ''; }
+}
+
+function extractReadableSequences(buf) {
+  const bytes = new Uint8Array(buf);
+  const chunks = [];
+  let cur = [];
+  for (let i = 0; i < Math.min(bytes.length, 400000); i++) {
+    const b = bytes[i];
+    if ((b >= 32 && b < 127) || b === 9 || b === 10 || b === 13) {
+      cur.push(String.fromCharCode(b));
+    } else {
+      if (cur.length >= 5) chunks.push(cur.join(''));
+      cur = [];
+    }
   }
-  return result;
+  if (cur.length >= 5) chunks.push(cur.join(''));
+  return chunks.filter(s => s.trim().split(/\s+/).length > 2).join(' ');
+}
+
+// ===================== CONTENT ANALYSIS =====================
+function parseContentIntoTopics(text, fileName) {
+  const clean = (text || '').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  const subject = guessSubjectFromText(clean, fileName);
+
+  if (clean.trim().split(/\s+/).length < 40) {
+    return guessTopicsFromFileName(fileName, subject);
+  }
+
+  const lines = clean.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  const sections = detectSections(lines);
+
+  if (sections.length < 2) {
+    // No clear headings — chunk by word count
+    return chunkUnstructuredText(clean, fileName, subject);
+  }
+
+  return sections
+    .filter(s => s.wordCount > 5 || s.title.length > 3)
+    .map(s => ({
+      id: Date.now() + Math.random(),
+      name:             sanitizeText(s.title, 80),
+      subject,
+      subtopics:        s.subtopics.map(st => sanitizeText(st, 60)).slice(0, 6),
+      difficulty:       estimateDifficulty(s.content),
+      estimatedMinutes: estimateStudyTime(s.wordCount),
+      wordCount:        s.wordCount,
+      done: false,
+    }))
+    .filter(t => t.name.length > 2);
+}
+
+function detectSections(lines) {
+  const sections = [];
+  let cur = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const next = lines[i+1] || '';
+
+    if (isMainHeading(line, next)) {
+      if (cur) sections.push(closeSection(cur));
+      cur = { title: cleanHeading(line), content: '', subtopics: [] };
+      if (/^[=\-]{3,}$/.test(next)) i++; // skip underline
+    } else if (cur) {
+      if (isSubHeading(line, next)) {
+        cur.subtopics.push(cleanHeading(line));
+        if (/^[=\-]{3,}$/.test(next)) i++;
+      } else {
+        cur.content += line + ' ';
+      }
+    }
+  }
+  if (cur) sections.push(closeSection(cur));
+  return sections;
+}
+
+function closeSection(s) {
+  return { ...s, wordCount: s.content.trim().split(/\s+/).filter(Boolean).length };
+}
+
+function isMainHeading(line, next) {
+  if (!line || line.length > 120) return false;
+  if (/^#{1,2}\s+\S/.test(line))                               return true;
+  if (next && /^={3,}$/.test(next))                            return true;
+  if (next && /^-{3,}$/.test(next) && line.length < 80)        return true;
+  if (/^(Chapter|Section|Unit|Module|Part|Lesson|Topic)\s+\d+/i.test(line)) return true;
+  if (/^\d+\.\s+[A-Z]/.test(line) && line.length < 90)         return true;
+  if (/^[IVX]+\.\s+[A-Z]/.test(line) && line.length < 80)      return true;
+  // ALL CAPS line of 2-8 words
+  if (/^[A-Z][A-Z\s\-]{3,60}$/.test(line) && line.split(/\s+/).length >= 2 && line.split(/\s+/).length <= 8) return true;
+  return false;
+}
+
+function isSubHeading(line, next) {
+  if (!line || line.length > 90) return false;
+  if (/^#{3,4}\s+\S/.test(line))               return true;
+  if (/^\d+\.\d+[\d.]*\s+[A-Z]/.test(line))   return true;
+  if (/^[A-Z]\.\s+[A-Z]/.test(line) && line.length < 70) return true;
+  return false;
+}
+
+function cleanHeading(line) {
+  return line
+    .replace(/^#{1,6}\s+/, '')
+    .replace(/^(Chapter|Section|Unit|Module|Part|Lesson|Topic)\s+\d+[:\.\s]*/i, '')
+    .replace(/^\d+(\.\d+)*[:\.\s]+/, '')
+    .replace(/^[A-Z]\.\s+/, '')
+    .replace(/^[IVX]+\.\s+/, '')
+    .trim();
+}
+
+function guessSubjectFromText(text, fileName) {
+  const sample = (fileName + ' ' + text.slice(0, 3000)).toLowerCase();
+  for (const key of Object.keys(TOPIC_TEMPLATES)) {
+    if (sample.includes(key)) return capitalize(key);
+  }
+  return fileName.replace(/\.[^.]+$/,'').replace(/[-_]/g,' ')
+    .split(' ').map(capitalize).join(' ').slice(0, 50) || 'General Studies';
+}
+
+function estimateStudyTime(wordCount) {
+  if (!wordCount || wordCount < 10) return 20;
+  // Study-mode reading ≈ 120 wpm; add 60 % for notes + practice
+  return Math.min(120, Math.max(15, Math.ceil((wordCount / 120) * 1.6)));
+}
+
+function estimateDifficulty(text) {
+  const words = (text || '').split(/\s+/).filter(Boolean);
+  if (words.length < 20) return 'medium';
+  const ratio = words.filter(w => w.replace(/[^a-z]/gi,'').length > 9).length / words.length;
+  return ratio > 0.22 ? 'hard' : ratio > 0.11 ? 'medium' : 'easy';
+}
+
+function chunkUnstructuredText(text, fileName, subject) {
+  const words = text.split(/\s+/).filter(Boolean);
+  const CHUNK = 500;
+  const total = Math.ceil(words.length / CHUNK);
+  const baseName = sanitizeText(fileName.replace(/\.[^.]+$/,'').replace(/[-_]/g,' '), 60);
+  return Array.from({ length: Math.min(total, 10) }, (_, i) => {
+    const chunk = words.slice(i * CHUNK, (i+1) * CHUNK);
+    return {
+      id: Date.now() + Math.random(),
+      name:             total > 1 ? `${baseName} — Part ${i+1}` : baseName,
+      subject,
+      subtopics:        extractKeyPhrases(chunk.join(' ')).slice(0, 4),
+      difficulty:       estimateDifficulty(chunk.join(' ')),
+      estimatedMinutes: estimateStudyTime(chunk.length),
+      wordCount:        chunk.length,
+      done: false,
+    };
+  });
+}
+
+function extractKeyPhrases(text) {
+  const seen = new Set();
+  const out  = [];
+  const re   = /\b([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,}){0,2})\b/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const p = m[1].trim();
+    if (p.length > 5 && !seen.has(p)) { seen.add(p); out.push(p); }
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
+function guessTopicsFromFileName(fileName, subject) {
+  const name = fileName.toLowerCase().replace(/\.[^.]+$/,'');
+  for (const [key, topicNames] of Object.entries(TOPIC_TEMPLATES)) {
+    if (name.includes(key))
+      return topicNames.slice(0,5).map(t => makeTopic(t, subject || capitalize(key)));
+  }
+  return [makeTopic(
+    sanitizeText(fileName.replace(/\.[^.]+$/,'').replace(/[-_]/g,' '), 60) || 'Study Material',
+    subject || 'General Studies'
+  )];
 }
 
 function makeTopic(name, subject) {
@@ -1342,12 +1592,37 @@ function generatePlan() {
     ({hard:0,medium:1,easy:2}[a.difficulty]) - ({hard:0,medium:1,easy:2}[b.difficulty])
   );
 
-  // Build session queue with initial study + revision + practice passes
+  // Session block size drives how large topics get split
+  const blockMins = { pomodoro: 25, balanced: 45, marathon: 90 };
+  const blockSize = blockMins[document.getElementById('break-pref').value] || 45;
+
+  // Build session queue — large topics split across multiple sessions
   let queue = [];
   sorted.forEach(t => {
-    queue.push({...t, sessionType:'study'});
-    queue.push({...t, sessionType:'revision', estimatedMinutes: Math.max(15, Math.floor(t.estimatedMinutes*0.4))});
-    queue.push({...t, sessionType:'practice', estimatedMinutes: Math.max(10, Math.floor(t.estimatedMinutes*0.3))});
+    const studyMins = t.estimatedMinutes || 45;
+
+    if (studyMins > blockSize * 1.5) {
+      // Split into numbered parts
+      const parts = Math.ceil(studyMins / blockSize);
+      const partMins = Math.ceil(studyMins / parts);
+      for (let p = 0; p < parts; p++) {
+        queue.push({
+          ...t,
+          sessionType: 'study',
+          estimatedMinutes: partMins,
+          name: parts > 1 ? `${t.name} (${p+1}/${parts})` : t.name,
+        });
+      }
+    } else {
+      queue.push({ ...t, sessionType: 'study' });
+    }
+
+    // Revision: 40 % of study time — scheduled on a later day via spaced repetition
+    queue.push({ ...t, sessionType: 'revision',
+      estimatedMinutes: Math.max(15, Math.floor(studyMins * 0.4)) });
+    // Practice: 30 % of study time
+    queue.push({ ...t, sessionType: 'practice',
+      estimatedMinutes: Math.max(10, Math.floor(studyMins * 0.3)) });
   });
 
   const plan = [];
@@ -1361,8 +1636,10 @@ function generatePlan() {
 
     while (used < minsPerDay && qi < queue.length) {
       const item = queue[qi];
-      const dur = Math.min(item.estimatedMinutes, minsPerDay - used, 120);
-      sessions.push({ topicName: item.name, topicId: item.id, type: item.sessionType, duration: dur });
+      // Never exceed one block per session entry; never overflow the day
+      const dur = Math.min(item.estimatedMinutes, blockSize, minsPerDay - used);
+      sessions.push({ topicName: item.name, topicId: item.id,
+                      type: item.sessionType, duration: dur });
       used += dur;
       qi++;
     }
@@ -1370,17 +1647,24 @@ function generatePlan() {
     if (sessions.length) plan.push({ date: fmtDate(date), sessions, dayIndex: day });
 
     if (qi >= queue.length) {
-      // Revision cycle
-      queue = sorted.map(t => ({...t, sessionType:'revision', estimatedMinutes: Math.max(15, Math.floor(t.estimatedMinutes*0.35))}));
+      // All content covered — start spaced revision cycle
+      queue = sorted.map(t => ({
+        ...t, sessionType: 'revision',
+        estimatedMinutes: Math.max(15, Math.floor((t.estimatedMinutes||45) * 0.35)),
+      }));
       qi = 0;
     }
   }
+
+  const totalWords = state.topics.reduce((a,t) => a + (t.wordCount||0), 0);
+  const wordNote   = totalWords > 0 ? ` · ~${Math.round(totalWords/1000)}k words` : '';
 
   state.studyPlan = plan;
   saveState();
   renderPlan();
   document.getElementById('plan-output').style.display = 'block';
-  document.getElementById('plan-summary-text').textContent = `${plan.length} days · ${sorted.length} topics`;
+  document.getElementById('plan-summary-text').textContent =
+    `${plan.length} days · ${sorted.length} topics${wordNote}`;
   showToast('🎉 Study plan generated!');
 }
 
