@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none';">
 <title>StudyFlow - Smart Study Planner</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -517,7 +518,8 @@ body {
         onclick="document.getElementById('file-input').click()">
         <div class="upload-icon">📤</div>
         <h3>Drop your files here or click to browse</h3>
-        <p>Supports PDF, DOCX, PPTX, TXT, and more</p>
+        <p>PDF, DOCX, PPTX, TXT, MD, CSV · max 25 MB per file · max 20 files</p>
+        <p style="margin-top:6px;font-size:0.78rem;color:#9ca3af">🔒 Files are processed locally in your browser — nothing is uploaded to any server</p>
         <button class="upload-btn" onclick="event.stopPropagation(); document.getElementById('file-input').click()">Choose Files</button>
         <input type="file" id="file-input" multiple accept=".pdf,.doc,.docx,.ppt,.pptx,.txt,.md,.csv" style="display:none" onchange="handleFileSelect(event)">
       </div>
@@ -718,15 +720,15 @@ body {
     <div class="modal-subtitle">Enter topic details manually</div>
     <div class="input-group" style="margin-bottom:12px">
       <label class="input-label">Topic Name *</label>
-      <input type="text" id="new-topic-name" class="input-field" placeholder="e.g. Photosynthesis">
+      <input type="text" id="new-topic-name" class="input-field" placeholder="e.g. Photosynthesis" maxlength="80">
     </div>
     <div class="input-group" style="margin-bottom:12px">
       <label class="input-label">Subject</label>
-      <input type="text" id="new-topic-subject" class="input-field" placeholder="e.g. Biology">
+      <input type="text" id="new-topic-subject" class="input-field" placeholder="e.g. Biology" maxlength="50">
     </div>
     <div class="input-group" style="margin-bottom:12px">
       <label class="input-label">Subtopics (comma-separated)</label>
-      <input type="text" id="new-topic-subtopics" class="input-field" placeholder="e.g. Light reactions, Calvin cycle">
+      <input type="text" id="new-topic-subtopics" class="input-field" placeholder="e.g. Light reactions, Calvin cycle" maxlength="300">
     </div>
     <div class="input-group" style="margin-bottom:12px">
       <label class="input-label">Estimated Time (minutes)</label>
@@ -778,6 +780,55 @@ body {
 <div class="toast" id="toast"></div>
 
 <script>
+// ===================== SECURITY UTILITIES =====================
+function escapeHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function sanitizeText(str, maxLen = 200) {
+  return String(str ?? '').replace(/<[^>]*>/g, '').replace(/[<>"'`]/g, '').trim().slice(0, maxLen);
+}
+
+// Allowed file types: extension → expected MIME prefix(es)
+const ALLOWED_TYPES = {
+  pdf:  ['application/pdf'],
+  doc:  ['application/msword'],
+  docx: ['application/vnd.openxmlformats-officedocument.wordprocessingml'],
+  ppt:  ['application/vnd.ms-powerpoint'],
+  pptx: ['application/vnd.openxmlformats-officedocument.presentationml'],
+  txt:  ['text/plain'],
+  md:   ['text/plain','text/markdown','text/x-markdown'],
+  csv:  ['text/csv','text/plain','application/csv'],
+  odt:  ['application/vnd.oasis.opendocument'],
+  odp:  ['application/vnd.oasis.opendocument'],
+};
+const MAX_FILE_SIZE  = 25 * 1024 * 1024; // 25 MB
+const MAX_FILE_COUNT = 20;
+
+function validateFile(file) {
+  // Block path-traversal or shell-injection characters in the name
+  if (/[/\\<>"';&|`]/.test(file.name)) return 'Filename contains invalid characters';
+
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (!ALLOWED_TYPES[ext]) return `Unsupported file type (.${ext})`;
+
+  if (file.size > MAX_FILE_SIZE) return `File exceeds the 25 MB limit`;
+
+  // MIME type check — browsers may report '' for unknown types, so allow empty
+  const mime = (file.type || '').toLowerCase();
+  if (mime && !ALLOWED_TYPES[ext].some(prefix => mime.startsWith(prefix))) {
+    // Warn but don't hard-block: MIME can be wrong on some OS/browsers
+    console.warn(`MIME mismatch for ${file.name}: got "${mime}"`);
+  }
+
+  return null; // valid
+}
+
 // ===================== STATE =====================
 let state = {
   files: [],
@@ -916,13 +967,14 @@ const QUIZ_BANK = {
 };
 
 function genericQuestions(topic) {
+  const t = escapeHtml(sanitizeText(topic, 60));
   return [
-    {q:`Which study method is most effective for ${topic}?`, opts:['Re-reading notes passively','Active recall and practice','Memorising without understanding','Avoiding exercises'], ans:1},
-    {q:`The foundation of ${topic} involves:`, opts:['Advanced topics first','Core principles and fundamentals','Memorising formulas only','Skipping basic concepts'], ans:1},
-    {q:`To master ${topic}, you should:`, opts:['Study once and done','Use spaced repetition and practice regularly','Only read summaries','Avoid difficult problems'], ans:1},
-    {q:`A key approach in ${topic} is:`, opts:['Ignoring details','Pattern recognition and application','Memorising without context','Skipping practice problems'], ans:1},
-    {q:`When reviewing ${topic}, prioritise:`, opts:['Topics you already know','Topics you find difficult','The last chapter only','Introduction only'], ans:1},
-    {q:`${topic} is best learned by:`, opts:['Watching videos only','Combining reading, practice, and testing','Reading once quickly','Avoiding revision'], ans:1},
+    {q:`Which study method is most effective for ${t}?`, opts:['Re-reading notes passively','Active recall and practice','Memorising without understanding','Avoiding exercises'], ans:1},
+    {q:`The foundation of ${t} involves:`, opts:['Advanced topics first','Core principles and fundamentals','Memorising formulas only','Skipping basic concepts'], ans:1},
+    {q:`To master ${t}, you should:`, opts:['Study once and done','Use spaced repetition and practice regularly','Only read summaries','Avoid difficult problems'], ans:1},
+    {q:`A key approach in ${t} is:`, opts:['Ignoring details','Pattern recognition and application','Memorising without context','Skipping practice problems'], ans:1},
+    {q:`When reviewing ${t}, prioritise:`, opts:['Topics you already know','Topics you find difficult','The last chapter only','Introduction only'], ans:1},
+    {q:`${t} is best learned by:`, opts:['Watching videos only','Combining reading, practice, and testing','Reading once quickly','Avoiding revision'], ans:1},
   ];
 }
 
@@ -942,8 +994,41 @@ function init() {
 function loadState() {
   try {
     const s = localStorage.getItem('studyflow_v2');
-    if (s) state = { ...state, ...JSON.parse(s) };
-  } catch(e) {}
+    if (!s) return;
+    const parsed = JSON.parse(s);
+
+    // Sanitize string fields that will later be rendered
+    if (Array.isArray(parsed.topics)) {
+      parsed.topics = parsed.topics.map(t => ({
+        ...t,
+        id:               t.id,
+        name:             sanitizeText(t.name, 80),
+        subject:          sanitizeText(t.subject, 50),
+        subtopics:        Array.isArray(t.subtopics) ? t.subtopics.map(s => sanitizeText(s, 60)).slice(0,10) : [],
+        difficulty:       ['easy','medium','hard'].includes(t.difficulty) ? t.difficulty : 'medium',
+        estimatedMinutes: Math.min(300, Math.max(5, Number(t.estimatedMinutes)||45)),
+      }));
+    }
+    if (Array.isArray(parsed.quizHistory)) {
+      parsed.quizHistory = parsed.quizHistory.map(q => ({
+        ...q,
+        topic: sanitizeText(q.topic, 80),
+        pct:   Math.min(100, Math.max(0, Number(q.pct)||0)),
+        score: Math.max(0, Number(q.score)||0),
+        total: Math.max(0, Number(q.total)||0),
+      })).slice(-50); // keep last 50 only
+    }
+    if (Array.isArray(parsed.files)) {
+      parsed.files = parsed.files.filter(f =>
+        typeof f.name === 'string' && !validateFile({ name: f.name, size: f.size||0, type: '' })
+      ).slice(0, MAX_FILE_COUNT);
+    }
+    // Numeric/boolean fields
+    parsed.streak             = Math.max(0, Number(parsed.streak)||0);
+    parsed.totalMinutesStudied = Math.max(0, Number(parsed.totalMinutesStudied)||0);
+
+    state = { ...state, ...parsed };
+  } catch(e) { console.warn('State load error', e); }
 }
 
 function saveState() {
@@ -1021,10 +1106,22 @@ function fmtSize(b) {
 }
 
 function processFiles(files) {
-  files.forEach(f => {
+  const errors = [];
+
+  for (const f of files) {
+    if (state.files.length >= MAX_FILE_COUNT) {
+      errors.push(`Max ${MAX_FILE_COUNT} files allowed`);
+      break;
+    }
+    const err = validateFile(f);
+    if (err) { errors.push(`${escapeHtml(f.name.slice(0,40))}: ${err}`); continue; }
     if (!state.files.find(x => x.name === f.name))
       state.files.push({ name: f.name, size: f.size });
-  });
+  }
+
+  if (errors.length) showToast('⚠️ ' + errors[0]);
+  if (!state.files.length) return;
+
   renderFileList();
   document.getElementById('files-section').style.display = 'block';
   document.getElementById('no-files-topics').style.display = 'none';
@@ -1037,8 +1134,8 @@ function renderFileList() {
       <div class="file-info">
         <span class="file-icon">${getFileIcon(f.name)}</span>
         <div>
-          <div class="file-name">${f.name}</div>
-          <div class="file-size">${fmtSize(f.size)}</div>
+          <div class="file-name">${escapeHtml(f.name)}</div>
+          <div class="file-size">${escapeHtml(fmtSize(f.size))}</div>
         </div>
       </div>
       <button class="file-remove" onclick="removeFile(${i})">✕</button>
@@ -1152,22 +1249,24 @@ function renderTopicList() {
   });
   el.innerHTML = Object.entries(bySubject).map(([subj, topics]) => `
     <div style="margin-bottom:18px">
-      <div style="font-size:0.78rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--text-light);margin-bottom:8px">${subj}</div>
-      ${topics.map(t => `
+      <div style="font-size:0.78rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--text-light);margin-bottom:8px">${escapeHtml(subj)}</div>
+      ${topics.map(t => {
+        const safeDiff = ['easy','medium','hard'].includes(t.difficulty) ? t.difficulty : 'medium';
+        return `
         <div class="topic-item">
           <div class="topic-left">
             <div>
-              <div class="topic-name">${t.name}</div>
-              <div class="subtopic-list">${t.subtopics.slice(0,3).map(s => `<span class="subtopic-chip">${s}</span>`).join('')}</div>
+              <div class="topic-name">${escapeHtml(t.name)}</div>
+              <div class="subtopic-list">${t.subtopics.slice(0,3).map(s => `<span class="subtopic-chip">${escapeHtml(s)}</span>`).join('')}</div>
             </div>
           </div>
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <span class="difficulty-badge diff-${t.difficulty}">${t.difficulty}</span>
-            <span class="time-badge">⏱ ${t.estimatedMinutes}m</span>
-            <button class="file-remove" onclick="removeTopic('${t.id}')">✕</button>
+            <span class="difficulty-badge diff-${safeDiff}">${escapeHtml(safeDiff)}</span>
+            <span class="time-badge">⏱ ${escapeHtml(String(t.estimatedMinutes))}m</span>
+            <button class="file-remove" onclick="removeTopic('${escapeHtml(String(t.id))}')">✕</button>
           </div>
-        </div>
-      `).join('')}
+        </div>`;
+      }).join('')}
     </div>
   `).join('');
 }
@@ -1189,11 +1288,13 @@ function showAddTopicModal() {
 function closeModal(id) { document.getElementById(id).classList.remove('show'); }
 
 function addManualTopic() {
-  const name    = document.getElementById('new-topic-name').value.trim();
-  const subject = document.getElementById('new-topic-subject').value.trim() || 'General';
-  const subs    = document.getElementById('new-topic-subtopics').value.split(',').map(s=>s.trim()).filter(Boolean);
-  const time    = parseInt(document.getElementById('new-topic-time').value) || 45;
-  const diff    = document.getElementById('new-topic-diff').value;
+  const name    = sanitizeText(document.getElementById('new-topic-name').value, 80);
+  const subject = sanitizeText(document.getElementById('new-topic-subject').value, 50) || 'General';
+  const subs    = document.getElementById('new-topic-subtopics').value
+                    .split(',').map(s => sanitizeText(s, 60)).filter(Boolean).slice(0, 10);
+  const time    = Math.min(300, Math.max(5, parseInt(document.getElementById('new-topic-time').value) || 45));
+  const rawDiff = document.getElementById('new-topic-diff').value;
+  const diff    = ['easy','medium','hard'].includes(rawDiff) ? rawDiff : 'medium';
 
   if (!name) { showToast('⚠️ Enter a topic name'); return; }
 
@@ -1305,6 +1406,7 @@ function renderPlan() {
         ${day.sessions.map((s, si) => {
           const key = day.dayIndex+'_'+si;
           const isDone = !!state.completedSessions[key];
+          const safeType = ['study','revision','practice'].includes(s.type) ? s.type : 'study';
           return `
             <div class="session-item ${isDone ? 'completed' : ''}">
               <div class="session-left">
@@ -1312,13 +1414,13 @@ function renderPlan() {
                   ${isDone ? '✓' : ''}
                 </div>
                 <div>
-                  <div class="session-topic ${isDone ? 'done-text' : ''}">${icons[s.type]||'📖'} ${s.topicName}</div>
-                  <div style="font-size:0.78rem;color:var(--text-light);text-transform:capitalize">${s.type}</div>
+                  <div class="session-topic ${isDone ? 'done-text' : ''}">${icons[safeType]||'📖'} ${escapeHtml(s.topicName)}</div>
+                  <div style="font-size:0.78rem;color:var(--text-light);text-transform:capitalize">${escapeHtml(safeType)}</div>
                 </div>
               </div>
               <div style="display:flex;align-items:center;gap:8px">
-                <span class="session-duration">⏱ ${s.duration}m</span>
-                ${!isDone ? `<button class="btn-secondary" style="padding:5px 12px;font-size:0.8rem" onclick="openTimer(${s.duration},'${s.topicName.replace(/'/g,"\\'")}')">▶</button>` : ''}
+                <span class="session-duration">⏱ ${Number(s.duration)||0}m</span>
+                ${!isDone ? `<button class="btn-secondary start-timer-btn" style="padding:5px 12px;font-size:0.8rem" data-duration="${Number(s.duration)||25}" data-topic="${escapeHtml(s.topicName)}">▶</button>` : ''}
               </div>
             </div>
           `;
@@ -1401,8 +1503,9 @@ function renderStudyTab() {
 
   const icons = {study:'📖', revision:'🔁', practice:'✍️'};
   sessions.innerHTML = todayPlan.sessions.map((s, si) => {
-    const key    = todayPlan.dayIndex + '_' + si;
-    const isDone = !!state.completedSessions[key];
+    const key     = todayPlan.dayIndex + '_' + si;
+    const isDone  = !!state.completedSessions[key];
+    const safeType = ['study','revision','practice'].includes(s.type) ? s.type : 'study';
     return `
       <div class="session-item ${isDone ? 'completed' : ''}">
         <div class="session-left">
@@ -1410,11 +1513,11 @@ function renderStudyTab() {
             ${isDone ? '✓' : ''}
           </div>
           <div>
-            <div class="session-topic ${isDone ? 'done-text' : ''}">${icons[s.type]||'📖'} ${s.topicName}</div>
-            <div style="font-size:0.78rem;color:var(--text-light);text-transform:capitalize">${s.type} · ${s.duration} min</div>
+            <div class="session-topic ${isDone ? 'done-text' : ''}">${icons[safeType]||'📖'} ${escapeHtml(s.topicName)}</div>
+            <div style="font-size:0.78rem;color:var(--text-light);text-transform:capitalize">${escapeHtml(safeType)} · ${Number(s.duration)||0} min</div>
           </div>
         </div>
-        ${!isDone ? `<button class="btn-primary" style="padding:8px 16px;font-size:0.85rem" onclick="openTimer(${s.duration},'${s.topicName.replace(/'/g,"\\'")}')">▶ Start</button>` : '<span style="color:#16a34a;font-weight:700">✓ Done</span>'}
+        ${!isDone ? `<button class="btn-primary start-timer-btn" style="padding:8px 16px;font-size:0.85rem" data-duration="${Number(s.duration)||25}" data-topic="${escapeHtml(s.topicName)}">▶ Start</button>` : '<span style="color:#16a34a;font-weight:700">✓ Done</span>'}
       </div>
     `;
   }).join('');
@@ -1429,8 +1532,8 @@ function renderStudyTab() {
     <div class="reminder-item">
       <span class="reminder-icon">🔁</span>
       <div>
-        <div class="reminder-text">${r.topicName}</div>
-        <div class="reminder-time">${new Date(r.date+'T00:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}</div>
+        <div class="reminder-text">${escapeHtml(r.topicName)}</div>
+        <div class="reminder-time">${escapeHtml(new Date(r.date+'T00:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'}))}</div>
       </div>
     </div>
   `).join('') : `<div style="color:var(--text-light);font-size:0.9rem;padding:12px;text-align:center">No revisions in the next 3 days 🎉</div>`;
@@ -1504,7 +1607,7 @@ let quiz = { questions:[], idx:0, score:0, answered:false, topicName:'' };
 function populateQuizTopics() {
   const sel = document.getElementById('quiz-topic');
   sel.innerHTML = '<option value="">-- All Topics Mixed --</option>' +
-    state.topics.map(t => `<option value="${t.name}">${t.name}</option>`).join('');
+    state.topics.map(t => `<option value="${escapeHtml(t.name)}">${escapeHtml(t.name)}</option>`).join('');
 }
 
 function getQuestions(topicName, count) {
@@ -1668,7 +1771,7 @@ function renderProgressTab() {
       return `
         <div style="margin-bottom:14px">
           <div style="display:flex;justify-content:space-between;margin-bottom:4px">
-            <span style="font-weight:600;font-size:0.9rem">${subj}</span>
+            <span style="font-weight:600;font-size:0.9rem">${escapeHtml(subj)}</span>
             <span style="font-size:0.85rem;color:var(--text-light)">${data.done}/${data.total} · ${pct}%</span>
           </div>
           <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
@@ -1692,13 +1795,16 @@ function renderProgressTab() {
     histEl.innerHTML = state.quizHistory.slice(-10).reverse().map(q => {
       const d   = new Date(q.date).toLocaleDateString('en-US',{month:'short',day:'numeric'});
       const clr = q.pct>=80?'#16a34a':q.pct>=60?'#d97706':'#dc2626';
+      const safePct   = Math.min(100, Math.max(0, Number(q.pct)||0));
+      const safeScore = Number(q.score)||0;
+      const safeTotal = Number(q.total)||0;
       return `
         <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)">
           <div>
-            <div style="font-weight:600;font-size:0.9rem">${q.topic}</div>
-            <div style="font-size:0.8rem;color:var(--text-light)">${d} · ${q.score}/${q.total} correct</div>
+            <div style="font-weight:600;font-size:0.9rem">${escapeHtml(q.topic)}</div>
+            <div style="font-size:0.8rem;color:var(--text-light)">${escapeHtml(d)} · ${safeScore}/${safeTotal} correct</div>
           </div>
-          <div style="font-size:1.2rem;font-weight:800;color:${clr}">${q.pct}%</div>
+          <div style="font-size:1.2rem;font-weight:800;color:${clr}">${safePct}%</div>
         </div>`;
     }).join('');
   }
@@ -1751,6 +1857,17 @@ function showToast(msg) {
 }
 
 // ===================== MISC =====================
+
+// Event delegation for timer buttons — avoids embedding topic names in onclick strings
+document.addEventListener('click', e => {
+  const btn = e.target.closest('.start-timer-btn');
+  if (btn) {
+    const dur   = Math.min(180, Math.max(1, parseInt(btn.dataset.duration, 10) || 25));
+    const topic = sanitizeText(btn.dataset.topic || 'Session', 80);
+    openTimer(dur, topic);
+  }
+});
+
 document.querySelectorAll('.modal-overlay').forEach(o =>
   o.addEventListener('click', e => { if (e.target===o) o.classList.remove('show'); })
 );
