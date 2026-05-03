@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'unsafe-inline'; img-src data: https:; connect-src https://*.supabase.co wss://*.supabase.co;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'unsafe-inline'; img-src data: https:; connect-src https://*.supabase.co wss://*.supabase.co https://api.anthropic.com;">
 <title>StudyFlow - Smart Study Planner</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -486,6 +486,61 @@ body {
   color: var(--primary);
   font-variant-numeric: tabular-nums;
 }
+
+.gear-btn {
+  background: rgba(255,255,255,0.2);
+  border: none;
+  color: white;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 1.1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+}
+.gear-btn:hover { background: rgba(255,255,255,0.35); }
+
+.ai-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: linear-gradient(135deg,#6c63ff,#9b59b6);
+  color: white;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  letter-spacing: 0.3px;
+}
+
+.ai-summary-card {
+  background: linear-gradient(135deg,#f0eeff,#faf0ff);
+  border: 1px solid #d4caff;
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+.ai-summary-card h4 { font-size: 0.85rem; font-weight: 700; color: #6c63ff; margin-bottom: 8px; }
+.ai-summary-card p  { font-size: 0.9rem; color: #4b5563; line-height: 1.6; margin: 0; }
+
+.key-input { position: relative; }
+.key-input input { padding-right: 80px; }
+.key-input .show-key-btn {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--text-light);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 4px 8px;
+}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 </head>
@@ -508,6 +563,7 @@ body {
       <span id="user-name">User</span>
       <button onclick="signOut()" style="background:rgba(255,255,255,0.3);border:none;color:white;padding:3px 10px;border-radius:12px;cursor:pointer;font-size:0.8rem;font-weight:600;">Sign out</button>
     </div>
+    <button class="gear-btn" onclick="openAISettings()" title="AI Settings">⚙️</button>
   </div>
 </header>
 
@@ -564,6 +620,7 @@ body {
           <div class="card-title" style="margin:0">🎯 Topics</div>
           <button class="btn-secondary" onclick="showAddTopicModal()">+ Add Topic</button>
         </div>
+        <div id="ai-summary" style="display:none"></div>
         <div id="topic-list"></div>
         <div style="margin-top:16px">
           <button class="btn-primary" onclick="goToTab('plan')">📅 Create Study Plan →</button>
@@ -726,6 +783,30 @@ body {
   </div>
 
 </main>
+
+<!-- AI Settings Modal -->
+<div class="modal-overlay" id="ai-settings-modal">
+  <div class="modal">
+    <div class="modal-title">🤖 AI Analysis Settings</div>
+    <div class="modal-subtitle">Uses Claude AI to precisely read and summarize your documents</div>
+    <div class="input-group" style="margin-bottom:8px">
+      <label class="input-label">Anthropic API Key</label>
+      <div class="key-input">
+        <input type="password" id="ai-key-input" class="input-field" placeholder="sk-ant-api03-…" autocomplete="off">
+        <button class="show-key-btn" onclick="toggleKeyVisibility()">Show</button>
+      </div>
+    </div>
+    <p style="font-size:0.78rem;color:var(--text-light);margin-bottom:16px;line-height:1.5;">
+      Your key is stored locally in your browser only — never uploaded anywhere.
+      Get a free key at <strong>console.anthropic.com</strong>.
+    </p>
+    <div style="display:flex;gap:10px">
+      <button class="btn-primary" onclick="saveAIKey()">Save Key</button>
+      <button class="btn-secondary" onclick="clearAIKey()">Remove Key</button>
+    </div>
+    <div id="ai-key-status" style="margin-top:12px;font-size:0.85rem;font-weight:600;"></div>
+  </div>
+</div>
 
 <!-- Add Topic Modal -->
 <div class="modal-overlay" id="add-topic-modal">
@@ -990,6 +1071,120 @@ function genericQuestions(topic) {
     {q:`When reviewing ${t}, prioritise:`, opts:['Topics you already know','Topics you find difficult','The last chapter only','Introduction only'], ans:1},
     {q:`${t} is best learned by:`, opts:['Watching videos only','Combining reading, practice, and testing','Reading once quickly','Avoiding revision'], ans:1},
   ];
+}
+
+// ===================== AI ANALYSIS =====================
+const AI_KEY_STORE = 'studyflow_ai_key';
+
+function getAIKey() { return localStorage.getItem(AI_KEY_STORE) || ''; }
+
+function openAISettings() {
+  const input = document.getElementById('ai-key-input');
+  const key = getAIKey();
+  input.value = key ? '••••••••••••' + key.slice(-4) : '';
+  document.getElementById('ai-key-status').textContent = key ? '✅ Key saved' : '';
+  document.getElementById('ai-settings-modal').classList.add('show');
+}
+
+function saveAIKey() {
+  const raw = document.getElementById('ai-key-input').value.trim();
+  if (!raw || raw.startsWith('••')) {
+    document.getElementById('ai-key-status').textContent = '⚠️ Paste your full key to save it.';
+    return;
+  }
+  if (!raw.startsWith('sk-ant-')) {
+    document.getElementById('ai-key-status').textContent = '⚠️ Key should start with sk-ant-';
+    return;
+  }
+  localStorage.setItem(AI_KEY_STORE, raw);
+  document.getElementById('ai-key-status').textContent = '✅ Key saved!';
+  document.getElementById('ai-key-input').value = '••••••••••••' + raw.slice(-4);
+}
+
+function clearAIKey() {
+  localStorage.removeItem(AI_KEY_STORE);
+  document.getElementById('ai-key-input').value = '';
+  document.getElementById('ai-key-status').textContent = 'Key removed.';
+}
+
+function toggleKeyVisibility() {
+  const inp = document.getElementById('ai-key-input');
+  const btn = document.querySelector('.show-key-btn');
+  if (inp.type === 'password') { inp.type = 'text'; btn.textContent = 'Hide'; }
+  else { inp.type = 'password'; btn.textContent = 'Show'; }
+}
+
+async function aiAnalyzeContent(text, fileName) {
+  const key = getAIKey();
+  if (!key) return null;
+
+  // Trim to ~15 000 chars (~3 000 words) to stay within a fast request
+  const excerpt = text.length > 15000
+    ? text.slice(0, 7500) + '\n\n[… middle section omitted …]\n\n' + text.slice(-7500)
+    : text;
+
+  const prompt = `You are analyzing study material for a student aged 14-25.
+File name: "${sanitizeText(fileName, 80)}"
+
+Content:
+${excerpt}
+
+Reply with ONLY a valid JSON object — no markdown fences, no commentary:
+{
+  "summary": "<2-3 sentence plain-English overview of what this document covers>",
+  "topics": [
+    {
+      "name": "<concise topic title>",
+      "subtopics": ["<subtopic1>", "<subtopic2>"],
+      "estimatedMinutes": <integer 10-120>,
+      "difficulty": "easy|medium|hard",
+      "keyPoints": ["<1-liner>", "<1-liner>"]
+    }
+  ]
+}
+
+Rules:
+- Between 2 and 12 topics total.
+- estimatedMinutes reflects actual reading + note-taking time.
+- subtopics list 2-5 items; keyPoints list 2-4 items.
+- Keep all text concise and student-friendly.`;
+
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-allow-browser': 'true',
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 2048,
+      messages: [{ role: 'user', content: prompt }]
+    })
+  });
+
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `HTTP ${resp.status}`);
+  }
+
+  const data = await resp.json();
+  const raw  = data.content?.[0]?.text?.trim() || '';
+  // Strip possible markdown fences
+  const json = raw.replace(/^```json\s*/,'').replace(/^```\s*/,'').replace(/```\s*$/,'');
+  return JSON.parse(json);
+}
+
+function renderAISummary(summary) {
+  const el = document.getElementById('ai-summary');
+  if (!el) return;
+  el.style.display = 'block';
+  el.innerHTML = `
+    <div class="ai-summary-card">
+      <h4>🤖 AI Summary <span class="ai-badge">Claude AI</span></h4>
+      <p>${escapeHtml(summary)}</p>
+    </div>`;
 }
 
 // ===================== SUPABASE =====================
@@ -1280,7 +1475,39 @@ async function extractTopics() {
       fileInfo.wordCount = words;
 
       statusEl.textContent = `Analysing ${fileInfo.name} (${words.toLocaleString()} words)…`;
-      const topics = parseContentIntoTopics(text, fileInfo.name);
+
+      let topics;
+      const subject = guessSubjectFromText(text, fileInfo.name);
+
+      if (getAIKey()) {
+        try {
+          statusEl.textContent = `🤖 AI reading ${fileInfo.name}…`;
+          const aiResult = await aiAnalyzeContent(text, fileInfo.name);
+          if (aiResult?.topics?.length) {
+            topics = aiResult.topics.map(t => ({
+              id: Date.now() + Math.random(),
+              name:             sanitizeText(t.name || 'Topic', 80),
+              subject,
+              subtopics:        (t.subtopics || []).map(s => sanitizeText(s, 60)).slice(0, 6),
+              difficulty:       ['easy','medium','hard'].includes(t.difficulty) ? t.difficulty : 'medium',
+              estimatedMinutes: Math.min(120, Math.max(10, parseInt(t.estimatedMinutes) || 30)),
+              keyPoints:        (t.keyPoints || []).map(p => sanitizeText(p, 120)).slice(0, 4),
+              aiGenerated: true,
+              done: false,
+            }));
+            if (aiResult.summary) renderAISummary(aiResult.summary);
+          } else {
+            topics = parseContentIntoTopics(text, fileInfo.name);
+          }
+        } catch(aiErr) {
+          console.warn('AI analysis failed, falling back:', aiErr.message);
+          showToast(`⚠️ AI failed (${aiErr.message}). Using built-in analysis.`);
+          topics = parseContentIntoTopics(text, fileInfo.name);
+        }
+      } else {
+        topics = parseContentIntoTopics(text, fileInfo.name);
+      }
+
       newTopics.push(...topics);
     }
 
@@ -1294,7 +1521,8 @@ async function extractTopics() {
     renderFileList();   // refresh word-count badges
     renderTopicList();
     populateQuizTopics();
-    showToast(`✅ Extracted ${newTopics.length} topics from ${state.files.length} file(s)!`);
+    const aiLabel = getAIKey() ? ' (AI-powered)' : '';
+    showToast(`✅ Extracted ${newTopics.length} topics from ${state.files.length} file(s)${aiLabel}!`);
   } catch(e) {
     console.error(e);
     document.getElementById('processing-section').style.display = 'none';
@@ -1598,7 +1826,7 @@ function renderTopicList() {
         <div class="topic-item">
           <div class="topic-left">
             <div>
-              <div class="topic-name">${escapeHtml(t.name)}</div>
+              <div class="topic-name">${escapeHtml(t.name)}${t.aiGenerated ? ' <span class="ai-badge">AI</span>' : ''}</div>
               <div class="subtopic-list">${t.subtopics.slice(0,3).map(s => `<span class="subtopic-chip">${escapeHtml(s)}</span>`).join('')}</div>
             </div>
           </div>
