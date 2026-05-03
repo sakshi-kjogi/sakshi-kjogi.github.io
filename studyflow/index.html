@@ -726,7 +726,11 @@ body {
   <!-- QUIZ TAB -->
   <div class="tab-content" id="content-quiz">
     <div id="quiz-setup" class="card">
-      <div class="card-title">🧠 Generate a Quiz</div>
+      <div class="section-header" style="margin-bottom:0">
+        <div class="card-title" style="margin:0">🧠 Generate a Quiz</div>
+        <div id="quiz-ai-badge" style="display:none"><span class="ai-badge">AI-powered</span></div>
+      </div>
+      <p id="quiz-ai-hint" style="font-size:0.8rem;color:var(--text-light);margin:8px 0 16px;"></p>
       <div class="plan-setup">
         <div class="input-group">
           <label class="input-label">Topic</label>
@@ -743,7 +747,7 @@ body {
           </select>
         </div>
       </div>
-      <button class="btn-primary" onclick="startQuiz()">🚀 Start Quiz</button>
+      <button class="btn-primary" id="start-quiz-btn" onclick="startQuiz()">🚀 Start Quiz</button>
     </div>
 
     <div id="quiz-area" style="display:none">
@@ -1097,8 +1101,10 @@ function saveAIKey() {
     return;
   }
   localStorage.setItem(AI_KEY_STORE, raw);
+  state.topics.forEach(t => { delete t.cachedQuestions; });
   document.getElementById('ai-key-status').textContent = '✅ Key saved!';
   document.getElementById('ai-key-input').value = '••••••••••••' + raw.slice(-4);
+  populateQuizTopics();
 }
 
 function clearAIKey() {
@@ -1493,6 +1499,7 @@ async function extractTopics() {
               estimatedMinutes: Math.min(120, Math.max(10, parseInt(t.estimatedMinutes) || 30)),
               keyPoints:        (t.keyPoints || []).map(p => sanitizeText(p, 120)).slice(0, 4),
               aiGenerated: true,
+              sourceFile: fileInfo.name,
               done: false,
             }));
             if (aiResult.summary) renderAISummary(aiResult.summary);
@@ -1506,6 +1513,7 @@ async function extractTopics() {
         }
       } else {
         topics = parseContentIntoTopics(text, fileInfo.name);
+        topics.forEach(t => { t.sourceFile = fileInfo.name; });
       }
 
       newTopics.push(...topics);
@@ -2212,37 +2220,132 @@ function populateQuizTopics() {
   const sel = document.getElementById('quiz-topic');
   sel.innerHTML = '<option value="">-- All Topics Mixed --</option>' +
     state.topics.map(t => `<option value="${escapeHtml(t.name)}">${escapeHtml(t.name)}</option>`).join('');
+  const hasKey = !!getAIKey();
+  const badge = document.getElementById('quiz-ai-badge');
+  const hint  = document.getElementById('quiz-ai-hint');
+  if (badge) badge.style.display = hasKey ? 'block' : 'none';
+  if (hint) hint.textContent = hasKey
+    ? 'Questions are generated from your uploaded content by Claude AI.'
+    : 'Add an Anthropic API key (⚙️) to get questions generated from your actual files.';
 }
 
-function getQuestions(topicName, count) {
+async function aiGenerateQuizQuestions(topicName, subtopics, keyPoints, text) {
+  const key = getAIKey();
+  if (!key) return null;
+
+  const excerpt = text
+    ? (text.length > 8000 ? text.slice(0, 4000) + '\n\n[...]\n\n' + text.slice(-4000) : text)
+    : '';
+
+  const prompt = `Generate multiple-choice quiz questions for a student studying "${sanitizeText(topicName, 80)}".
+${subtopics?.length  ? `Subtopics: ${subtopics.map(s => sanitizeText(s,60)).join(', ')}` : ''}
+${keyPoints?.length  ? `Key points: ${keyPoints.map(p => sanitizeText(p,120)).join('; ')}` : ''}
+${excerpt            ? `\nSource material:\n${excerpt}` : ''}
+
+Produce exactly 8 questions that test understanding of the content above.
+Reply with ONLY a valid JSON array — no markdown, no commentary:
+[
+  {
+    "q": "<question>",
+    "opts": ["<A>", "<B>", "<C>", "<D>"],
+    "ans": <0-3>
+  }
+]
+Rules:
+- Questions must be about this specific content, NOT generic study advice.
+- All four options should be plausible; only one correct.
+- Mix recall, comprehension, and application.
+- Language suitable for a 14-25 year old student.`;
+
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-allow-browser': 'true',
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 2048,
+      messages: [{ role: 'user', content: prompt }]
+    })
+  });
+
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = await resp.json();
+  const raw  = (data.content?.[0]?.text || '').trim()
+    .replace(/^```json\s*/,'').replace(/^```\s*/,'').replace(/```\s*$/,'');
+  const qs = JSON.parse(raw);
+  return qs.filter(q =>
+    typeof q.q === 'string' && Array.isArray(q.opts) &&
+    q.opts.length === 4 && typeof q.ans === 'number' && q.ans >= 0 && q.ans <= 3
+  );
+}
+
+function getFallbackQuestions(topicName, count) {
+  if (!topicName) {
+    let pool = [];
+    state.topics.forEach(t =>
+      pool.push(...(QUIZ_BANK[t.name] || genericQuestions(t.name)).slice())
+    );
+    return pool.sort(() => Math.random()-0.5).slice(0, count);
+  }
   let pool = (QUIZ_BANK[topicName] || genericQuestions(topicName)).slice();
   while (pool.length < count) pool = [...pool, ...genericQuestions(topicName)];
   return pool.sort(() => Math.random()-0.5).slice(0, count);
 }
 
-function startQuiz() {
+async function startQuiz() {
   const topicName = document.getElementById('quiz-topic').value;
   const count     = parseInt(document.getElementById('quiz-count').value);
 
-  let questions;
-  if (topicName) {
-    questions = getQuestions(topicName, count);
-  } else if (state.topics.length) {
-    questions = [];
-    state.topics.forEach(t =>
-      questions.push(...getQuestions(t.name, Math.max(1, Math.ceil(count/state.topics.length))))
-    );
-    questions = questions.sort(() => Math.random()-0.5).slice(0, count);
+  if (!state.topics.length) { showToast('⚠️ Add topics first!'); return; }
+
+  const btn = document.getElementById('start-quiz-btn');
+  btn.disabled = true;
+
+  let questions = [];
+
+  if (getAIKey()) {
+    btn.textContent = '🤖 Generating questions…';
+    const targetTopics = topicName
+      ? state.topics.filter(t => t.name === topicName)
+      : state.topics;
+    try {
+      for (const topic of targetTopics) {
+        if (topic.cachedQuestions?.length >= 8) {
+          questions.push(...topic.cachedQuestions);
+          continue;
+        }
+        const fileInfo = state.files.find(f => f.name === topic.sourceFile);
+        const text = fileInfo?.textContent || '';
+        const aiQs = await aiGenerateQuizQuestions(topic.name, topic.subtopics, topic.keyPoints, text);
+        if (aiQs?.length) {
+          topic.cachedQuestions = aiQs;
+          questions.push(...aiQs);
+        }
+      }
+      if (!questions.length) throw new Error('no questions returned');
+    } catch(e) {
+      console.warn('AI quiz failed:', e.message);
+      showToast('⚠️ AI unavailable — using built-in questions.');
+      questions = getFallbackQuestions(topicName, count);
+    }
   } else {
-    showToast('⚠️ Add topics first!');
-    return;
+    questions = getFallbackQuestions(topicName, count);
   }
+
+  btn.disabled = false;
+  btn.textContent = '🚀 Start Quiz';
+
+  questions = questions.sort(() => Math.random()-0.5).slice(0, count);
 
   quiz = { questions, idx:0, score:0, answered:false, topicName: topicName||'Mixed Topics' };
   document.getElementById('quiz-setup').style.display = 'none';
   document.getElementById('quiz-area').style.display = 'block';
   document.getElementById('quiz-score-display').style.display = 'none';
-  document.getElementById('quiz-title').textContent = `Quiz: ${quiz.topicName}`;
+  document.getElementById('quiz-title').textContent = `Quiz: ${escapeHtml(quiz.topicName)}`;
   renderQuestion();
 }
 
