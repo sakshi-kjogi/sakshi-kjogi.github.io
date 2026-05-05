@@ -6,7 +6,9 @@
       "Bash(npm --version)",
       "Bash(python -m venv venv)",
       "Bash(venv\\\\Scripts\\\\pip install *)",
-      "PowerShell(@\\(\"ap-southeast-1\",\"ap-south-1\",\"us-east-1\",\"eu-west-2\",\"ap-northeast-1\"\\) | ForEach-Object { $h = \"aws-0-$_.pooler.supabase.com\"; try { $r = Resolve-DnsName $h -ErrorAction Stop; \"$h -> $\\($r[0].IPAddress\\)\" } catch { \"$h -> no record\" } })"
+      "PowerShell(@\\(\"ap-southeast-1\",\"ap-south-1\",\"us-east-1\",\"eu-west-2\",\"ap-northeast-1\"\\) | ForEach-Object { $h = \"aws-0-$_.pooler.supabase.com\"; try { $r = Resolve-DnsName $h -ErrorAction Stop; \"$h -> $\\($r[0].IPAddress\\)\" } catch { \"$h -> no record\" } })",
+      "PowerShell(try { $r = Invoke-WebRequest \"https://bkcxwmexmdyottccflha.supabase.co/rest/v1/\" -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop; \"HTTP $\\($r.StatusCode\\)\" } catch { \"HTTP $\\($_.Exception.Response.StatusCode.value__\\): $\\($_.Exception.Message\\)\" })",
+      "PowerShell(cd \"c:\\\\Users\\\\Sakshi Kananthoor\\\\OneDrive\\\\Documents\\\\GitHub\\\\sakshi-kjogi.github.io\\\\FoodFusion\\\\backend\"; $dsn = \"postgresql://postgres.bkcxwmexmdyottccflha:Sakshi%259482@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres\"; for \\($i=1; $i -le 20; $i++\\) { $out = .\\\\venv\\\\Scripts\\\\python.exe test_connection.py $dsn 2>&1 | Select-String \"SUCCESS|FAILED\"; Write-Host \"[$\\(Get-Date -Format 'HH:mm:ss'\\)] Attempt $i`: $out\"; if \\($out -match \"SUCCESS\"\\) { break }; Start-Sleep 15 })"
     ]
   }
 }
