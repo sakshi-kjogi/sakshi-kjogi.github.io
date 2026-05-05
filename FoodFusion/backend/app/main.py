@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -7,10 +9,23 @@ from app.config.settings import settings
 from app.db.database import close_db, init_db
 from app.routers import auth as auth_router
 
+logger = logging.getLogger("foodfusion")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()
+    # Retry DB connection up to 5 times (handles resumed Supabase projects)
+    for attempt in range(1, 6):
+        try:
+            await init_db()
+            logger.info("Database pool ready.")
+            break
+        except Exception as exc:
+            if attempt == 5:
+                raise RuntimeError(f"Could not connect to database after 5 attempts: {exc}") from exc
+            wait = attempt * 3
+            logger.warning("DB connection attempt %d failed (%s) — retrying in %ds", attempt, exc, wait)
+            await asyncio.sleep(wait)
     yield
     await close_db()
 
